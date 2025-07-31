@@ -1,0 +1,167 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// WiFi credentials
+const char* ssid = "iPhone";
+const char* password = "1234567890";
+
+// Receiver ESP32 HTTP endpoint (Update path /update)
+const char* serverIP = "http://172.20.10.3/update";
+
+// OLED Config
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Sensor and actuator pins
+#define DHTPIN 13
+#define DHTTYPE DHT22
+#define SOIL_PIN 34
+#define LDR_PIN 32
+#define FAN_PIN 26
+#define PUMP_PIN 27
+
+DHT dht(DHTPIN, DHTTYPE);
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(FAN_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW);
+  digitalWrite(PUMP_PIN, LOW);
+
+  Wire.begin();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("❌ OLED not found");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.println("📡 Sender Starting...");
+  display.display();
+  delay(2000);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi Connected");
+  Serial.print("Sender IP: ");
+  Serial.println(WiFi.localIP());
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("✅ WiFi Connected");
+  display.println(WiFi.localIP());
+  display.display();
+  delay(1500);
+}
+
+void loop() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  int soil = analogRead(SOIL_PIN);
+  int light = analogRead(LDR_PIN);
+
+  bool fanOn = false;
+  bool pumpOn = false;
+
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("⚠️ Failed to read DHT sensor!");
+    temp = 0.0;
+    hum = 0.0;
+  }
+
+  // 🔄 Fan Control: ON only if temperature > 33°C
+  if (temp > 33.0) {
+    digitalWrite(FAN_PIN, HIGH);
+    fanOn = true;
+  } else {
+    digitalWrite(FAN_PIN, LOW);
+  }
+
+  // Pump Control (unchanged)
+  if (soil < 4000) {
+    digitalWrite(PUMP_PIN, HIGH);
+    pumpOn = true;
+  } else {
+    digitalWrite(PUMP_PIN, LOW);
+  }
+
+  // Serial Monitor output
+  Serial.println("===== Sensor Readings =====");
+  Serial.printf("🌡 Temp: %.2f °C\n", temp);
+  Serial.printf("💧 Hum : %.2f %%\n", hum);
+  Serial.printf("🌱 Soil: %d\n", soil);
+  Serial.printf("☀️ Light: %d\n", light);
+  Serial.printf("🌬 Fan : %s\n", fanOn ? "ON" : "OFF");
+  Serial.printf("💧 Pump: %s\n", pumpOn ? "ON" : "OFF");
+
+  // OLED display update
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Sender: Monitoring");
+
+  display.setCursor(0, 10);
+  display.printf("Temp: %.1f C", temp);
+
+  display.setCursor(0, 20);
+  display.printf("Hum : %.1f %%", hum);
+
+  display.setCursor(0, 30);
+  display.printf("Soil: %d", soil);
+
+  display.setCursor(0, 40);
+  display.printf("Light: %d", light);
+
+  display.setCursor(0, 50);
+  display.printf("Fan : %s", fanOn ? "ON" : "OFF");
+
+  display.setCursor(0, 60);
+  display.printf("Pump: %s", pumpOn ? "ON" : "OFF");
+
+  display.display();
+
+  // Send JSON to receiver
+  String payload = "{";
+  payload += "\"temp\":" + String(temp, 1) + ",";
+  payload += "\"hum\":" + String(hum, 1) + ",";
+  payload += "\"soil\":" + String(soil) + ",";
+  payload += "\"light\":" + String(light) + ",";
+  payload += "\"fan\":" + String(fanOn ? 1 : 0) + ",";
+  payload += "\"pump\":" + String(pumpOn ? 1 : 0);
+  payload += "}";
+
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverIP);
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST(payload);
+
+    Serial.println("📡 Sent JSON: " + payload);
+    Serial.printf("📨 HTTP Response code: %d\n", httpCode);
+
+    http.end();
+  } else {
+    Serial.println("❌ WiFi not connected");
+  }
+
+  Serial.println("==========================\n");
+
+  delay(5000);  // 5 seconds delay
+}

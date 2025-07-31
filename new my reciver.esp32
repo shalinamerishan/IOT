@@ -1,0 +1,151 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+const char* ssid = "iPhone";
+const char* password = "1234567890";
+
+const char* googleScriptURL = "https://script.google.com/macros/s/AKfycbwSTukEHSUK5ETqr0raFgbTdwzFSOT-2vY5Yi6YBjXdEIobUv4nS0cXYmX050SzajvMdA/exec";
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+#define RELAY_PUMP_PIN 25
+#define RELAY_FAN_PIN 26
+
+float temperature = 0.0;
+float humidity = 0.0;
+int soil = 0;
+int light = 0;
+bool fanOn = false;
+bool pumpOn = false;
+
+WebServer server(80);
+
+void updateOLED() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  display.setCursor(0, 0);  display.println("Receiver: Monitoring");
+  display.setCursor(0, 10); display.printf("Temp: %.1f C", temperature);
+  display.setCursor(0, 20); display.printf("Hum : %.1f %%", humidity);
+  display.setCursor(0, 30); display.printf("Soil: %d", soil);
+  display.setCursor(0, 40); display.printf("Light: %d", light);
+  display.setCursor(0, 50); display.printf("Fan : %s", fanOn ? "ON" : "OFF");
+  display.setCursor(0, 60); display.printf("Pump: %s", pumpOn ? "ON" : "OFF");
+
+  display.display();
+}
+
+void sendToGoogleSheet() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(googleScriptURL);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{";
+    payload += "\"temp\":" + String(temperature, 1) + ",";
+    payload += "\"hum\":" + String(humidity, 1) + ",";
+    payload += "\"soil\":" + String(soil) + ",";
+    payload += "\"light\":" + String(light) + ",";
+    payload += "\"fan\":" + String(fanOn ? 1 : 0) + ",";
+    payload += "\"pump\":" + String(pumpOn ? 1 : 0);
+    payload += "}";
+
+    int httpCode = http.POST(payload);
+    Serial.printf("📤 Google Sheet Upload: %d\n", httpCode);
+    http.end();
+  }
+}
+
+void handleUpdate() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "text/plain", "Bad Request");
+    return;
+  }
+
+  String body = server.arg("plain");
+  Serial.println("📥 Received JSON:");
+  Serial.println(body);
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, body);
+
+  if (error) {
+    Serial.print("❌ JSON Parse Error: ");
+    Serial.println(error.c_str());
+    server.send(400, "text/plain", "Invalid JSON");
+    return;
+  }
+
+  temperature = doc["temp"] | 0.0;
+  humidity = doc["hum"] | 0.0;
+  soil = doc["soil"] | 0;
+  light = doc["light"] | 0;
+  fanOn = doc["fan"] | 0;
+  pumpOn = doc["pump"] | 0;
+
+  digitalWrite(RELAY_FAN_PIN, fanOn ? HIGH : LOW);
+  digitalWrite(RELAY_PUMP_PIN, pumpOn ? HIGH : LOW);
+
+  updateOLED();
+  sendToGoogleSheet();
+
+  server.send(200, "application/json", "{\"status\":\"received\"}");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(RELAY_FAN_PIN, OUTPUT);
+  pinMode(RELAY_PUMP_PIN, OUTPUT);
+  digitalWrite(RELAY_FAN_PIN, LOW);
+  digitalWrite(RELAY_PUMP_PIN, LOW);
+
+  Wire.begin();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("❌ OLED allocation failed");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Receiver Starting...");
+  display.display();
+  delay(2000);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi Connected");
+  Serial.print("Receiver IP: ");
+  Serial.println(WiFi.localIP());
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("WiFi Connected!");
+  display.println(WiFi.localIP());
+  display.display();
+  delay(1500);
+
+  server.on("/update", HTTP_POST, handleUpdate);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+}
